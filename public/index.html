@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF Formatierter Text-Extractor</title>
+  <meta
+    name="description"
+    content="Lade eine PDF hoch und erhalte die formatierte Textstruktur inklusive Schriftgrößen und -stile."
+  />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <p class="badge">PDF • Text • Format</p>
+      <h1>Formatierte Texte aus PDFs</h1>
+      <p>
+        Ziehe deine PDF hier hinein oder wähle sie aus, damit wir den Text inklusive Schriftgrößen,
+        Stilen und Zeilenstruktur als HTML erkennen.
+      </p>
+    </header>
+
+    <section class="uploader">
+      <div class="api-card">
+        <div class="api-card__header">
+          <p class="badge badge-ghost">Mistral API-Key</p>
+          <span class="api-card__hint">Wird nur im Browser gespeichert und pro Anfrage gesendet.</span>
+        </div>
+        <div class="api-fields">
+          <label for="api-key">Eigener API-Key</label>
+          <input type="password" id="api-key" name="api-key" placeholder="sk-..." autocomplete="off" />
+          <button type="button" id="save-api-key">Key speichern</button>
+        </div>
+      </div>
+      <details class="usage" open>
+        <summary>API-Kosten & Guthaben</summary>
+        <div class="usage__body">
+          <p class="usage__copy">
+            Dein Guthaben kannst du direkt im Mistral-Dashboard einsehen. Wir leiten dich dorthin.
+          </p>
+          <div class="usage__controls">
+            <a class="usage__btn" href="https://console.mistral.ai/usage" target="_blank" rel="noreferrer">
+              Usage im Mistral-Dashboard öffnen
+            </a>
+            <a class="usage__link" href="https://mistral.ai/pricing" target="_blank" rel="noreferrer">
+              Offizielle Preise & Modelle
+            </a>
+          </div>
+        </div>
+      </details>
+      <form id="upload-form" class="upload-form">
+        <label for="pdf-input">PDF auswählen</label>
+        <input type="file" name="pdf" id="pdf-input" accept="application/pdf" required />
+        <button id="convert-btn" type="submit" disabled>Extrahieren</button>
+      </form>
+      <div id="drop-area" class="drop-area">
+        Datei hier ablegen
+      </div>
+      <p id="status" class="status">Keine Datei ausgewählt.</p>
+      <div id="loading-indicator" class="loading" hidden>
+        <div class="spinner"></div>
+        <div class="loading-text">
+          <strong>Konvertierung läuft</strong>
+          <small>Wir holen Text & Layout aus deiner PDF…</small>
+        </div>
+      </div>
+    </section>
+
+    <section id="result-panel" class="result">
+      <div class="result-toolbar">
+        <div>
+          <h2>Formatierte Vorschau</h2>
+          <p>Die Struktur rechts entstand aus der PDF. Du kannst sie direkt kopieren.</p>
+        </div>
+        <div class="actions">
+          <label class="toggle">
+            <input type="checkbox" id="toggle-image-desc" />
+            <span>Bildbeschreibungen deaktivieren</span>
+          </label>
+          <button id="copy-html" type="button">Kopiere HTML</button>
+          <button id="copy-text" type="button">Kopiere reinen Text</button>
+          <button id="export-word" type="button">Export als Word</button>
+        </div>
+      </div>
+      <div id="preview" class="preview"></div>
+      <textarea id="text-output" readonly placeholder="Hier erscheint der reine Text der PDF"></textarea>
+    </section>
+  </main>
+  <audio id="convert-audio" src="sources/c6atsrdzjtn-loading-sfx-3.mp3" preload="auto"></audio>
+  <script src="app.js" defer></script>
+</body>
+</html>
