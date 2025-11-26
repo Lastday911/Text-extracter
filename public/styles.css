@@ -455,10 +455,57 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 0.1rem;
+  width: 100%;
 }
 
 .line span {
   white-space: pre;
+}
+
+.line[data-align='center'] {
+  justify-content: center;
+  text-align: center;
+}
+
+.line[data-align='right'] {
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.line[data-align='justify'] {
+  justify-content: space-between;
+  text-align: justify;
+}
+
+.tables {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.table-block strong {
+  display: inline-block;
+  margin-bottom: 0.3rem;
+}
+
+.table-block table {
+  width: 100%;
+  border-collapse: collapse;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: white;
+}
+
+.table-block th,
+.table-block td {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+}
+
+.table-block th {
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 700;
 }
 
 .image-grid {

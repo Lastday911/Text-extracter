@@ -19,6 +19,16 @@ const API_KEY_STORAGE_KEY = 'mistral_api_key';
 let audioInterval = null;
 let lastResult = null;
 
+const normalizeAlignment = (value) => {
+  if (!value) return 'left';
+  const raw = String(value).trim().toLowerCase();
+  if (['left', 'start', 'l', 'align_left'].includes(raw)) return 'left';
+  if (['right', 'end', 'r', 'align_right'].includes(raw)) return 'right';
+  if (['center', 'centre', 'middle', 'c', 'align_center'].includes(raw)) return 'center';
+  if (['justify', 'justified', 'full', 'distributed', 'block'].includes(raw)) return 'justify';
+  return 'left';
+};
+
 const setStatus = (message, tone = 'neutral') => {
   statusEl.textContent = message;
   statusEl.dataset.tone = tone;
@@ -136,9 +146,19 @@ const requestImageDescription = async (img) => {
 
 const buildPlainText = (pages) =>
   pages
-    .map((page) =>
-      page.lines.map((line) => line.segments.map((segment) => segment.text).join('')).join('\n')
-    )
+    .map((page) => {
+      const lines = Array.isArray(page.lines) ? page.lines : [];
+      const tables = Array.isArray(page.tables) ? page.tables : [];
+      return [
+        lines.map((line) => (line.segments || []).map((segment) => segment.text).join('')).join('\n'),
+        tables
+          .map((tbl) => tbl.text || '')
+          .filter(Boolean)
+          .join('\n\n'),
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+    })
     .join('\n\n');
 
 const renderPreview = (pages = []) => {
@@ -157,6 +177,21 @@ const renderPreview = (pages = []) => {
     (page.lines || []).forEach((line) => {
       const lineEl = document.createElement('div');
       lineEl.className = 'line';
+      const align = normalizeAlignment(
+        line.align || line.textAlign || line.text_alignment || line.justification || line.justify
+      );
+      lineEl.dataset.align = align;
+      const justifyMap = {
+        left: 'flex-start',
+        center: 'center',
+        right: 'flex-end',
+        justify: 'space-between',
+      };
+      lineEl.style.justifyContent = justifyMap[align] || 'flex-start';
+      lineEl.style.textAlign = align;
+      if (align === 'justify') {
+        lineEl.style.display = 'block';
+      }
       line.segments?.forEach((segment) => {
         const span = document.createElement('span');
         Object.entries(segment.style).forEach(([key, value]) => {
@@ -167,6 +202,25 @@ const renderPreview = (pages = []) => {
       });
       article.appendChild(lineEl);
     });
+
+    if (Array.isArray(page.tables) && page.tables.length) {
+      const tableWrap = document.createElement('div');
+      tableWrap.className = 'tables';
+      page.tables.forEach((tbl, idx) => {
+        if (!tbl?.html) return;
+        const block = document.createElement('div');
+        block.className = 'table-block';
+        const label = document.createElement('strong');
+        label.textContent = `Tabelle ${idx + 1}`;
+        block.appendChild(label);
+        const holder = document.createElement('div');
+        holder.className = 'table-holder';
+        holder.innerHTML = tbl.html;
+        block.appendChild(holder);
+        tableWrap.appendChild(block);
+      });
+      article.appendChild(tableWrap);
+    }
 
     if (Array.isArray(page.images) && page.images.length) {
       const imageGrid = document.createElement('div');

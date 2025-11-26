@@ -46,10 +46,58 @@ const defaultSegmentStyle = {
   fontStyle: 'normal',
   fontFamily: 'Inter, sans-serif',
   letterSpacing: '0.15px',
+  textDecoration: 'none',
 };
 const fallbackFontSize = 16;
 const mistralEnabled = Boolean(MISTRAL_OCR_API_URL);
 const markdownRenderer = new marked.Renderer();
+
+const normalizeAlignment = (value) => {
+  if (!value) return null;
+  const raw = String(value).trim().toLowerCase();
+  if (['left', 'start', 'l', 'align_left'].includes(raw)) return 'left';
+  if (['right', 'end', 'r', 'align_right'].includes(raw)) return 'right';
+  if (['center', 'centre', 'middle', 'c', 'align_center'].includes(raw)) return 'center';
+  if (['justify', 'justified', 'full', 'distributed', 'block'].includes(raw)) return 'justify';
+  return null;
+};
+
+const normalizeTextDecoration = (segment = {}) => {
+  const rawDecoration =
+    segment.textDecoration ||
+    segment.text_decoration ||
+    segment.textDecorationLine ||
+    segment.text_decoration_line ||
+    segment.decoration ||
+    segment.style?.textDecoration ||
+    segment.style?.text_decoration;
+
+  const textDecorStr = typeof rawDecoration === 'string' ? rawDecoration.toLowerCase() : '';
+  const fromString = [];
+  if (textDecorStr.includes('underline')) fromString.push('underline');
+  if (textDecorStr.includes('line-through') || textDecorStr.includes('strikethrough')) {
+    fromString.push('line-through');
+  }
+
+  const hasUnderline = Boolean(
+    segment.underline ||
+      segment.isUnderline ||
+      segment.underlined ||
+      fromString.includes('underline')
+  );
+  const hasStrike = Boolean(
+    segment.strikethrough ||
+      segment.strike ||
+      segment.isStrike ||
+      segment.isStrikethrough ||
+      fromString.includes('line-through')
+  );
+
+  if (hasUnderline && hasStrike) return 'underline line-through';
+  if (hasUnderline) return 'underline';
+  if (hasStrike) return 'line-through';
+  return 'none';
+};
 
 marked.setOptions({
   breaks: true,
@@ -74,13 +122,214 @@ const toPixelString = (value, fallback = fallbackFontSize) => {
   return `${fallback}px`;
 };
 
-const buildSimpleSegment = (text) => ({
+const buildSimpleSegment = (text, styleOverrides = {}) => ({
   text,
-  style: { ...defaultSegmentStyle },
+  style: { ...defaultSegmentStyle, ...styleOverrides },
   meta: {},
 });
 
+const parseMarkdownToSegments = (text) => {
+  if (!text) return [];
+  
+  // Regex for bold (** or __), italic (* or _), and underline (<u>...</u>)
+  // This is a simplified parser and might not handle nested tags perfectly in all edge cases,
+  // but covers the 99% use case for OCR output.
+  // We split by tags and keep delimiters to identify them.
+  
+  const segments = [];
+  let currentStyle = {
+    fontWeight: defaultSegmentStyle.fontWeight,
+    fontStyle: defaultSegmentStyle.fontStyle,
+    textDecoration: defaultSegmentStyle.textDecoration,
+  };
+
+  // Strategy: Scan string and process tokens. 
+  // Because regex split is tricky with overlapping, we'll use a tokenizing loop.
+  // Supported: **bold**, __bold__, *italic*, _italic_, <u>underline</u>
+  
+  let remaining = text;
+  
+  while (remaining.length > 0) {
+    // Find earliest special token
+    const bold1 = remaining.indexOf('**');
+    const bold2 = remaining.indexOf('__');
+    const italic1 = remaining.indexOf('*');
+    const italic2 = remaining.indexOf('_');
+    const underlineStart = remaining.indexOf('<u>');
+    const underlineEnd = remaining.indexOf('</u>');
+
+    // Filter out -1 and find min
+    const indices = [bold1, bold2, italic1, italic2, underlineStart, underlineEnd]
+      .filter(i => i !== -1)
+      .sort((a, b) => a - b);
+
+    if (indices.length === 0) {
+      // No more tokens
+      segments.push(buildSimpleSegment(remaining, currentStyle));
+      break;
+    }
+
+    const nextIndex = indices[0];
+    
+    // Push text before token
+    if (nextIndex > 0) {
+      segments.push(buildSimpleSegment(remaining.substring(0, nextIndex), currentStyle));
+    }
+
+    // Process token
+    if (nextIndex === bold1) {
+      // Toggle bold
+      const isBold = currentStyle.fontWeight === 600;
+      currentStyle = { ...currentStyle, fontWeight: isBold ? 400 : 600 };
+      remaining = remaining.substring(nextIndex + 2);
+    } else if (nextIndex === bold2) {
+      const isBold = currentStyle.fontWeight === 600;
+      currentStyle = { ...currentStyle, fontWeight: isBold ? 400 : 600 };
+      remaining = remaining.substring(nextIndex + 2);
+    } else if (nextIndex === italic1) {
+      // Toggle italic (check if it's not part of **)
+      // If we hit * and it's actually part of **, bold1 would have been min index? 
+      // Wait, if string is "**text**", bold1 is 0, italic1 is 0. 
+      // We need to prioritize longer tokens.
+      
+      // Refined check:
+      if (remaining.startsWith('**')) {
+        const isBold = currentStyle.fontWeight === 600;
+        currentStyle = { ...currentStyle, fontWeight: isBold ? 400 : 600 };
+        remaining = remaining.substring(2);
+      } else {
+        const isItalic = currentStyle.fontStyle === 'italic';
+        currentStyle = { ...currentStyle, fontStyle: isItalic ? 'normal' : 'italic' };
+        remaining = remaining.substring(1);
+      }
+    } else if (nextIndex === italic2) {
+      if (remaining.startsWith('__')) {
+        const isBold = currentStyle.fontWeight === 600;
+        currentStyle = { ...currentStyle, fontWeight: isBold ? 400 : 600 };
+        remaining = remaining.substring(2);
+      } else {
+        const isItalic = currentStyle.fontStyle === 'italic';
+        currentStyle = { ...currentStyle, fontStyle: isItalic ? 'normal' : 'italic' };
+        remaining = remaining.substring(1);
+      }
+    } else if (nextIndex === underlineStart) {
+       currentStyle = { ...currentStyle, textDecoration: 'underline' };
+       remaining = remaining.substring(3);
+    } else if (nextIndex === underlineEnd) {
+       currentStyle = { ...currentStyle, textDecoration: 'none' }; // Or restore previous? Simplified to none for now or 'default'
+       // Better: if we have complex nesting, we might need a stack. 
+       // But for simple OCR output, toggling off is usually safe.
+       // Let's assume plain text default is none.
+       remaining = remaining.substring(4);
+    } else {
+      // Should not happen
+      remaining = remaining.substring(1);
+    }
+  }
+  
+  return segments.filter(s => s.text);
+};
+
+const escapeHtml = (value) =>
+  String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const normalizeTable = (tableData, index = 0) => {
+  if (!tableData) return null;
+  const rows =
+    tableData.rows ||
+    tableData.data ||
+    tableData.cells ||
+    tableData.content ||
+    tableData.table ||
+    [];
+
+  if (!Array.isArray(rows) || !rows.length) {
+    return null;
+  }
+
+  // Attempt to find geometry for positioning
+  // Mistral often returns 'geometry' with 'bounding_box' or 'top_left'
+  let yPos = 0;
+  let bbox = null;
+
+  if (tableData.geometry?.bounding_box) {
+    // [x_min, y_min, x_max, y_max] usually
+    bbox = tableData.geometry.bounding_box;
+    yPos = bbox[1] || 0;
+  } else if (tableData.geometry?.top_left) {
+    yPos = tableData.geometry.top_left.y || 0;
+  } else if (typeof tableData.y === 'number') {
+    yPos = tableData.y;
+  } else if (typeof tableData.top_left_y === 'number') {
+    yPos = tableData.top_left_y;
+  }
+
+  const normalizedRows = rows
+    .map((row) => {
+      if (Array.isArray(row)) return row;
+      if (Array.isArray(row?.cells)) return row.cells;
+      return null;
+    })
+    .filter(Boolean);
+
+  if (!normalizedRows.length) {
+    return null;
+  }
+
+  const buildCellText = (cell) => {
+    if (cell == null) return '';
+    if (typeof cell === 'string') return String(cell);
+    const raw = cell.text || cell.content || cell.value || cell.plain_text || '';
+    return String(raw);
+  };
+
+  const buildCellHtml = (cell) => escapeHtml(buildCellText(cell));
+
+  const htmlRows = normalizedRows
+    .map((row) => {
+      const cells = row
+        .map((cell) => {
+          if (cell == null) return '<td></td>';
+          const colspan = cell.colspan || cell.col_span || cell.span_cols;
+          const rowspan = cell.rowspan || cell.row_span || cell.span_rows;
+          const tag = cell.header || cell.is_header || cell.th ? 'th' : 'td';
+          const attrs = [];
+          if (colspan && Number(colspan) > 1) attrs.push(`colspan="${Number(colspan)}"`);
+          if (rowspan && Number(rowspan) > 1) attrs.push(`rowspan="${Number(rowspan)}"`);
+          const attrStr = attrs.length ? ` ${attrs.join(' ')}` : '';
+          return `<${tag}${attrStr}>${buildCellHtml(cell)}</${tag}>`;
+        })
+        .join('');
+      return `<tr>${cells}</tr>`;
+    })
+    .join('');
+
+  return {
+    id: tableData.id || tableData.table_id || `table-${index}`,
+    html: `<table>${htmlRows}</table>`,
+    text: normalizedRows
+      .map((row) => row.map((cell) => buildCellText(cell)).join('\t'))
+      .join('\n'),
+    y: yPos,
+    boundingBox: bbox,
+  };
+};
+
 const normalizeLine = (lineData, lineIndex) => {
+// ... existing normalizeLine code ...
+// I will keep the previous implementation of normalizeLine exactly as is, but just re-declare it to be safe if context was lost.
+// Actually, I'll rely on the existing `normalizeLine` if I can, but the tool requires replacing `old_string`.
+// Since I am replacing `normalizeTable`, I need to be careful.
+// The previous `normalizeTable` was modified in the last turn.
+// I will replace the block from `const normalizeTable ...` down to `const normalizeLine ...` to be safe, 
+// but wait, `normalizeLine` is large. 
+// I will just replace `normalizeTable` specifically.
+// But I also need to update `api/export-docx` which is further down.
+// I will split this into two replacements for safety.
   const rawSegments =
     lineData.segments ??
     lineData.text_runs ??
@@ -107,12 +356,15 @@ const normalizeLine = (lineData, lineIndex) => {
         .replace(/[^a-zA-Z0-9 ,'-]/g, '')
         .trim();
 
+      const textDecoration = normalizeTextDecoration(segment.style || segment);
+
       return {
         text: rawText,
         style: {
           fontSize: toPixelString(segment.fontSize ?? segment.style?.fontSize ?? fallbackFontSize),
           fontWeight: isBold ? 600 : defaultSegmentStyle.fontWeight,
           fontStyle: isItalic ? 'italic' : defaultSegmentStyle.fontStyle,
+          textDecoration: textDecoration || defaultSegmentStyle.textDecoration,
           fontFamily: `'${fontFamilyValue || defaultSegmentStyle.fontFamily}', ${defaultSegmentStyle.fontFamily}`,
           letterSpacing: defaultSegmentStyle.letterSpacing,
         },
@@ -131,9 +383,23 @@ const normalizeLine = (lineData, lineIndex) => {
     return null;
   }
 
+  const alignment =
+    normalizeAlignment(lineData.text_alignment) ||
+    normalizeAlignment(lineData.alignment) ||
+    normalizeAlignment(lineData.textAlign) ||
+    normalizeAlignment(lineData.text_align) ||
+    normalizeAlignment(lineData.align) ||
+    normalizeAlignment(lineData.justification) ||
+    normalizeAlignment(lineData.justify) ||
+    normalizeAlignment(lineData.style?.textAlign) ||
+    normalizeAlignment(lineData.style?.text_alignment) ||
+    null;
+
   return {
     y: lineData.position?.y ?? lineData.y ?? lineIndex * 18,
     segments,
+    align: alignment || 'left',
+    x: lineData.position?.x ?? lineData.x ?? 0, // Ensure X is accessible at line level
   };
 };
 
@@ -150,9 +416,14 @@ const convertSimpleTextToPages = (text) => {
       if (!normalizedLine.trim()) {
         return null;
       }
+      
+      // Use the new parser
+      const segments = parseMarkdownToSegments(normalizedLine);
+      
       return {
         y: index * 20,
-        segments: [buildSimpleSegment(normalizedLine)],
+        segments: segments.length ? segments : [buildSimpleSegment(normalizedLine)],
+        align: 'left',
       };
     })
     .filter(Boolean);
@@ -171,13 +442,18 @@ const convertSimpleTextToPages = (text) => {
 
 const pagesToPlainText = (pages = []) =>
   pages
-    .map((page) =>
-      (page.lines || [])
+    .map((page) => {
+      const lineText = (page.lines || [])
         .map((line) => (line?.segments || []).map((segment) => segment?.text || '').join(''))
         .map((lineText) => lineText.trimEnd())
         .filter(Boolean)
-        .join('\n')
-    )
+        .join('\n');
+      const tableText = (page.tables || [])
+        .map((tbl) => tbl.text)
+        .filter(Boolean)
+        .join('\n\n');
+      return [lineText, tableText].filter(Boolean).join('\n\n');
+    })
     .filter(Boolean)
     .join('\n\n');
 
@@ -219,6 +495,10 @@ const normalizeMistralResponse = (payload) => {
     let lines = (pageData.lines ?? pageData.text_lines ?? pageData.blocks ?? [])
       .map((line, idx) => normalizeLine(line, idx))
       .filter(Boolean);
+    const tablesRaw = pageData.tables || pageData.table || [];
+    const tables = Array.isArray(tablesRaw)
+      ? tablesRaw.map((tbl, idx) => normalizeTable(tbl, idx)).filter(Boolean)
+      : [];
     const images =
       pageData.images?.map((image) => ({
         id: image.id ?? image.image_id ?? null,
@@ -261,6 +541,7 @@ const normalizeMistralResponse = (payload) => {
       number: pageNumber,
       lines,
       images,
+      tables,
     };
   };
 
@@ -278,6 +559,17 @@ const normalizeMistralResponse = (payload) => {
         pages.push(normalized);
       }
     });
+  }
+
+  const topLevelTables = Array.isArray(payload.tables)
+    ? payload.tables.map((tbl, idx) => normalizeTable(tbl, idx)).filter(Boolean)
+    : [];
+  if (topLevelTables.length) {
+    if (pages.length) {
+      pages[0].tables = [...(pages[0].tables || []), ...topLevelTables];
+    } else {
+      pages.push({ number: 1, lines: [], images: [], tables: topLevelTables });
+    }
   }
 
   const markdownText =
@@ -360,12 +652,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
-
-const escapeHtml = (value) =>
-  String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 
 const describeImageWithVision = async (base64, apiKey) => {
   if (!base64 || !apiKey || !MISTRAL_VISION_MODEL) {
@@ -461,9 +747,18 @@ app.post('/api/export-docx', async (req, res) => {
       return res.status(400).json({ error: 'Bitte eigenen Mistral API-Key angeben.' });
     }
 
-    const htmlInput = typeof req.body?.html === 'string' ? req.body.html.trim() : '';
     const pages = Array.isArray(req.body?.pages) ? req.body.pages : [];
-    if (!pages.length && !htmlInput) {
+    const htmlInput = typeof req.body?.html === 'string' ? req.body.html.trim() : '';
+
+    // Strategy: "1 to 1" Fidelity
+    // We prioritize the detailed 'pages' object model (Mistral OCR JSON) because it contains
+    // exact font sizes, styles, and positioning that Markdown lacks.
+    // However, to ensure tables render correctly (as tables, not just text), we must:
+    // 1. Use the 'tables' array from the JSON.
+    // 2. Filter out the text lines that correspond to the table content (using bounding boxes) to avoid duplication.
+    const usePagesLayout = pages.length > 0;
+
+    if (!usePagesLayout && !htmlInput) {
       return res.status(400).json({ error: 'Keine Inhalte zum Export übergeben.' });
     }
 
@@ -472,13 +767,48 @@ app.post('/api/export-docx', async (req, res) => {
         .map((segment) => escapeHtml(segment.text || ''))
         .join('')
         .trim();
-    const includePageText = !htmlInput;
+        
+    const getLineAlign = (line) =>
+      normalizeAlignment(
+        line?.align ||
+          line?.textAlign ||
+          line?.text_align ||
+          line?.text_alignment ||
+          line?.justification ||
+          line?.justify
+      );
+      
+    const segmentToHtml = (segment) => {
+      const text = escapeHtml(segment?.text || '');
+      if (!text) return '';
+      const allowedKeys = {
+        fontSize: true,
+        fontWeight: true,
+        fontStyle: true,
+        fontFamily: true,
+        letterSpacing: true,
+        textDecoration: true,
+      };
+      const styleString = Object.entries(segment?.style || {})
+        .filter(([key]) => allowedKeys[key])
+        .map(([key, value]) => {
+          const cssKey = key.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+          return `${cssKey}:${escapeHtml(value)}`;
+        })
+        .join(';');
+      return styleString ? `<span style="${styleString}">${text}</span>` : text;
+    };
+
+    const renderLineHtml = (line) =>
+      (line?.segments || [])
+        .map((segment) => segmentToHtml(segment))
+        .join('')
+        .trim();
 
     const descriptions = {};
     if (!disableDescriptions) {
       for (const page of pages) {
         if (!Array.isArray(page.images)) continue;
-        // Sequential to stay under rate limits
         /* eslint-disable no-await-in-loop */
         for (const image of page.images) {
           if (!image?.base64 || image._removed) continue;
@@ -507,50 +837,123 @@ app.post('/api/export-docx', async (req, res) => {
 
     const bodyParts = [];
     bodyParts.push('<h1>PDF-Export</h1>');
-    if (htmlInput) {
-      bodyParts.push(htmlInput);
-    }
-    pages.forEach((page) => {
-      const hasImages = Array.isArray(page.images) && page.images.length;
-      const hasText = includePageText && Array.isArray(page.lines) && page.lines.length;
-      if (!hasText && !hasImages) {
-        return;
-      }
 
-      bodyParts.push(`<h2>Seite ${escapeHtml(page.number || '')}</h2>`);
-      if (hasText) {
-        (page.lines || []).forEach((line) => {
-          const text = escapeLine(line);
-          if (text) {
-            bodyParts.push(`<p>${text}</p>`);
-          }
+    if (usePagesLayout) {
+      pages.forEach((page) => {
+        bodyParts.push(`<h2>Seite ${escapeHtml(page.number || '')}</h2>`);
+        
+        const tables = (page.tables || []).map(t => ({ ...t, type: 'table' }));
+        
+        // Calculate table exclusion zones
+        // Mistral bbox is [x_min, y_min, x_max, y_max]
+        const tableZones = tables
+          .map(t => t.boundingBox)
+          .filter(bbox => Array.isArray(bbox) && bbox.length === 4)
+          .map(bbox => ({ xMin: bbox[0], yMin: bbox[1], xMax: bbox[2], yMax: bbox[3] }));
+
+        // Filter lines: Keep only lines that are NOT inside a table zone
+        // A line is "inside" if its center point falls within the box
+        const lines = (page.lines || []).filter(line => {
+           const lx = line.x ?? line.meta?.position?.x ?? 0;
+           const ly = line.y ?? line.meta?.position?.y ?? 0;
+           // Simple point check. If inside any table zone, drop it.
+           // We can add a small margin of error if needed, but exact check is usually fine.
+           const isInsideTable = tableZones.some(z => 
+             lx >= z.xMin && lx <= z.xMax && ly >= z.yMin && ly <= z.yMax
+           );
+           return !isInsideTable;
+        }).map(l => ({ ...l, type: 'line' }));
+
+        // Interleaved Rendering: Combine and Sort by Y
+        const elements = [...lines, ...tables].sort((a, b) => {
+           const ay = a.y ?? a.boundingBox?.[1] ?? 0;
+           const by = b.y ?? b.boundingBox?.[1] ?? 0;
+           return ay - by;
         });
-      }
-      if (hasImages) {
-        page.images.forEach((img, idx) => {
-          if (img._removed) {
-            return;
-          }
-          const key = img.id || img.base64?.slice(0, 16) || `${page.number}-${idx}`;
-          if (disableDescriptions) {
-            if (img.base64 && !img._replaceWithDescription) {
-              bodyParts.push(
-                `<p><img alt="Bild ${idx + 1}" style="max-width:100%;height:auto;" src="data:image/jpeg;base64,${img.base64}"/></p>`
-              );
-            } else if (img._description) {
-              bodyParts.push(`<p><strong>Bild:</strong> ${escapeHtml(img._description)}</p>`);
+
+        elements.forEach(el => {
+          if (el.type === 'table') {
+             if (el.html) {
+               bodyParts.push(`<div class="table-block">${el.html}</div>`);
+             }
+          } else {
+            const lineHtml = renderLineHtml(el);
+            if (lineHtml) {
+              const align = getLineAlign(el);
+              const xPos = el.x || el.meta?.position?.x || 0;
+              let styleAttr = '';
+              const styles = [];
+              
+              if (align && align !== 'left') {
+                styles.push(`text-align:${align}`);
+              }
+              if (align === 'left' && xPos > 10) {
+                 const indent = Math.min(xPos, 400); 
+                 styles.push(`margin-left:${indent}px`);
+              }
+
+              if (styles.length) {
+                styleAttr = ` style="${styles.join(';')}"`;
+              }
+
+              bodyParts.push(`<p${styleAttr}>${lineHtml}</p>`);
             }
-            return;
           }
-          const desc =
-            (img._replaceWithDescription && img._description) ||
-            descriptions[key] ||
-            'Bildbeschreibung nicht verfügbar.';
-          bodyParts.push(`<p><strong>Bild:</strong> ${escapeHtml(desc)}</p>`);
         });
+        
+        if (Array.isArray(page.images) && page.images.length) {
+           const validImages = page.images.filter(img => !img._removed);
+           if (validImages.length) {
+             bodyParts.push('<br/>');
+             validImages.forEach((img, idx) => {
+                const key = img.id || img.base64?.slice(0, 16) || `${page.number}-${idx}`;
+                if (disableDescriptions) {
+                  if (img.base64 && !img._replaceWithDescription) {
+                    bodyParts.push(
+                      `<p><img alt="Bild" style="max-width:100%;height:auto;" src="data:image/jpeg;base64,${img.base64}"/></p>`
+                    );
+                  } else if (img._description) {
+                     bodyParts.push(`<p><strong>Bild:</strong> ${escapeHtml(img._description)}</p>`);
+                  }
+                } else {
+                   const desc = (img._replaceWithDescription && img._description) || descriptions[key] || 'Bildbeschreibung nicht verfügbar.';
+                   bodyParts.push(`<p><strong>Bild:</strong> ${escapeHtml(desc)}</p>`);
+                }
+             });
+           }
+        }
+        bodyParts.push('<hr />');
+      });
+    } else {
+      // Fallback to Markdown HTML
+      if (htmlInput) {
+        bodyParts.push(htmlInput);
       }
-      bodyParts.push('<hr />');
-    });
+      const allImages = [];
+      pages.forEach(p => {
+        if (Array.isArray(p.images)) allImages.push(...p.images);
+      });
+      const validImages = allImages.filter(img => !img._removed);
+      if (validImages.length) {
+         bodyParts.push('<hr/><h2>Bilder</h2>');
+         validImages.forEach((img, idx) => {
+             // ... image rendering fallback ...
+            const key = img.id || img.base64?.slice(0, 16);
+            if (disableDescriptions) {
+              if (img.base64 && !img._replaceWithDescription) {
+                bodyParts.push(
+                  `<p><img alt="Bild" style="max-width:100%;height:auto;" src="data:image/jpeg;base64,${img.base64}"/></p>`
+                );
+              } else if (img._description) {
+                 bodyParts.push(`<p><strong>Bild:</strong> ${escapeHtml(img._description)}</p>`);
+              }
+            } else {
+               const desc = (img._replaceWithDescription && img._description) || descriptions[key] || 'Bildbeschreibung nicht verfügbar.';
+               bodyParts.push(`<p><strong>Bild:</strong> ${escapeHtml(desc)}</p>`);
+            }
+         });
+      }
+    }
 
     const htmlDoc = `
       <!DOCTYPE html>
@@ -559,9 +962,29 @@ app.post('/api/export-docx', async (req, res) => {
           <meta charset="UTF-8" />
           <style>
             body { font-family: "Segoe UI", Arial, sans-serif; line-height: 1.5; color: #111; }
-            h1, h2 { color: #0f172a; }
+            h1, h2, h3, h4 { color: #0f172a; margin-top: 1.2em; margin-bottom: 0.6em; }
             hr { border: 0; border-top: 1px solid #e2e8f0; margin: 1.5rem 0; }
             p { margin: 0.35rem 0; }
+            /* Stronger Table Styling for Word */
+            table { 
+              border-collapse: collapse; 
+              width: 100%; 
+              margin: 1rem 0; 
+              border: 1px solid #000;
+            }
+            th, td { 
+              border: 1px solid #000; 
+              padding: 0.5rem; 
+              text-align: left; 
+              vertical-align: top;
+            }
+            th { 
+              background-color: #f1f5f9; 
+              font-weight: bold; 
+            }
+            ul, ol { margin-left: 1.5rem; padding-left: 0; }
+            li { margin-bottom: 0.25rem; }
+            img { max-width: 100%; height: auto; }
           </style>
         </head>
         <body>
